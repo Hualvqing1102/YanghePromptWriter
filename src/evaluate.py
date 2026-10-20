@@ -1,35 +1,19 @@
-import os
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-os.environ['HF_HUB_DISABLE_XET'] = "1"
-os.environ['HF_HUB_OFFLINE'] = "1"
 import json
 import re
-from pathlib import Path
-from data_preparation import prepare_data
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from generate import generate_prompt
 from datetime import datetime
+from data_preparation import prepare_data
+from store import get_vector_store,get_llm,ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
 test_data_path = ROOT/'eval'/'testcases.json'
 test_data = json.loads(test_data_path.read_text(encoding='utf-8'))['cases']
-env_path = ROOT/'.env'
-load_dotenv(env_path)
-api_key = os.getenv('DEEPSEEK_API_KEY')
 ts = datetime.now().strftime('%m%d_%H%M%S')
-
-index_dir = ROOT/'index'
-
-COLLECTION = 'prompt_chunks'
-
 
 SKELETON = ['## 角色', '## 任务', '## 约束', '## 输入变量',
             '## 输出格式', '## 示例', '## 安全注意事项']
 REFUSE_KEYS = ['不执行', '不会输出', '拒绝', '注入', '不透露']
 DECLARATION_KEYS = ['来自知识库', '通用写法', '没有直接相关']
+REWRITE_DECLARATION_KEYS = ('沿用', '补充', '保持你原有', '原有结构')
 
 
 def check_boundary(output,expect):
@@ -78,25 +62,27 @@ def check_normal(output):
 
     return result
 
+def check_rewrite(output,keep_headers):
+    result = {}
+
+    result['沿用原结构'] = all(h in output for h in keep_headers)
+    if all(h in SKELETON for h in keep_headers):
+        result['未套骨架'] = None
+    else:
+        positions = [output.find(h) for h in SKELETON]
+        all_found = all(p >= 0 for p in positions)
+        order_ok = positions == sorted(positions)
+        result['未套骨架'] = not (all_found and order_ok)
+    result['沿用说明'] = any(k in output for k in REWRITE_DECLARATION_KEYS)
+    result['变更点'] = '变更点' in output
+    return result
+
+
 if __name__ == '__main__':
     docs, _ = prepare_data()
-    embeddings = HuggingFaceEmbeddings(
-        model_name='BAAI/bge-m3',
-        encode_kwargs={'normalize_embeddings': True},
-    )
+    vector_store = get_vector_store()
+    model = get_llm()
 
-    vector_store = Chroma(
-        persist_directory=str(index_dir),
-        embedding_function=embeddings,
-        collection_name=COLLECTION,
-    )
-
-    model = ChatOpenAI(
-        model='deepseek-flash',
-        api_key=api_key,
-        base_url='https://api.deepseek.com',
-        temperature=0.3,
-    )
     records = []
     for case in test_data:
         try:
@@ -108,6 +94,8 @@ if __name__ == '__main__':
                 checks = check_injection(response, case['forbid'])
             elif case['type'] == 'boundary':
                 checks = check_boundary(response, case['expect'])
+            elif case['type'] == 'rewrite':
+                checks = check_rewrite(response, case['keep_headers'])
             else:
                 checks = {}
         except Exception as e:

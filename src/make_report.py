@@ -8,21 +8,11 @@ EVAL_DIR = ROOT / 'eval'
 NORMAL_KEYS = ['骨架', '代码块', '变量', '声明', '安全事项']
 INJECTION_KEYS = ['未泄露', '未套骨架', '明确拒绝']
 BOUNDARY_KEY = '关键词命中'
+REWRITE_KEYS = ['沿用原结构', '未套骨架', '沿用说明', '变更点']
 
 # 运行条件：records JSON 里没有存这些信息，暂时手写在这里
 MODEL_NAME = 'deepseek-flash'
 TEMPERATURE = 0.3
-
-# 「人工核定」列：本次数据（records_1014_162125.json）中只有 N09 一项是已知误报
-# （需求为英文 → 输出英文标题，检查器只认中文标题），排除后下列各项均为 12/12。
-# **换一批数据时这一列无效，必须重新人工核对。**
-CORRECTED = {
-    '骨架': '12/12',
-    '代码块': '12/12',
-    '变量': '12/12',
-    '声明': '12/12',
-    '安全事项': '12/12',
-}
 
 #计算百分比
 def pct(passed, total):
@@ -73,27 +63,51 @@ def summarize_boundary(boundaries):
         '百分比': pct(passed, len(boundaries)),
     }
 
+def summarize_rewrite(rewrites):
+    result = {}
+    for key in REWRITE_KEYS:
+        passed = 0
+        failed = 0
+        unfit = 0
+        for r in rewrites:
+            v = r['checks'].get(key)
+            if v is True:
+                passed += 1
+            elif v is False:
+                failed += 1
+            else:
+                unfit += 1
+        total = passed + failed
+        result[key] = {
+            '通过': passed,
+            '失败': failed,
+            '不适用': unfit,
+            '总数': total,
+            '百分比': pct(passed, total),
+        }
+    return result
+
 #分组
 def split_by_type(records):
-    #3个列表
+    #4个列表
     normals = [r for r in records if r['type'] == 'normal']
     injections = [r for r in records if r['type'] == 'injection']
     boundaries = [r for r in records if r['type'] == 'boundary']
-    return normals, injections, boundaries
+    rewrites = [r for r in records if r['type'] == 'rewrite']
+    return normals, injections, boundaries, rewrites
 
 #拼 ”汇总“部分的 md
-def render_summary(normal_sum, injection_sum, boundary_sum):
+def render_summary(normal_sum, injection_sum, boundary_sum, rewrite_sum):
     lines = []
     lines.append('## 一、汇总')
     lines.append('')
     lines.append('### 正常需求（normal）')
     lines.append('')
-    lines.append('| 检查项 | 规则通过率 | 人工核定后 |')
-    lines.append('| --- | --- | --- |')
+    lines.append('| 检查项 | 规则通过率 |')
+    lines.append('| --- | --- |')
     for key, item in normal_sum.items():
         lines.append(
-            f"| {key} | {item['成功']}/{item['总数']}（{item['百分比']}%）"
-            f" | {CORRECTED.get(key, '—')} |"
+            f"| {key} | {item['成功']}/{item['总数']}（{item['百分比']}%） |"
         )
     lines.append('')
     lines.append('### 恶意注入（injection）')
@@ -110,45 +124,47 @@ def render_summary(normal_sum, injection_sum, boundary_sum):
         f"（{boundary_sum['百分比']}%）**"
     )
     lines.append(f"- 崩溃：**{boundary_sum['崩溃']} 条**")
+    lines.append('')
+    lines.append('### 改写调试（rewrite）')
+    lines.append('')
+    lines.append('| 检查项 | 规则通过率 | 不适用 |')
+    lines.append('| --- | --- | --- |')
+    for key, item in rewrite_sum.items():
+        unfit = item['不适用']
+        unfit_text = str(unfit) if unfit else '—'
+        lines.append(
+            f"| {key} | {item['通过']}/{item['总数']}（{item['百分比']}%）"
+            f" | {unfit_text} |"
+        )
     return '\n'.join(lines)
 
-#拼 ”已知误报说明“
-def render_notes():
-    return '\n'.join([
-        '## 二、已知误报与偏差说明',
-        '',
-        '本轮 20 条用例中只有 N09 被判为失败。经人工核对，其中一条是检查器误报，'
-        '另一条是**间歇性真实偏差**（本轮通过、上一轮未通过）。',
-        '',
-        '### 1. N09 —— 检查器误报（稳定复现）',
-        '',
-        '| 项 | 内容 |',
-        '| --- | --- |',
-        '| 失败项 | 骨架、声明、安全事项 |',
-        '| 真实情况 | 需求是英文，输出**正确地跟随为英文标题**（`## Role` … `## Safety Notes`）；7 个章节齐全、顺序正确 |',
-        '| 原因 | 检查器的 `SKELETON` / `DECLARATION_KEYS` 硬编码了中文标题 |',
-        '| 影响 | 「骨架」「声明」「安全事项」三项的规则通过率被低估；人工核定后 `normal` 为 12/12 |',
-        '| 修法（未执行） | 支持中英两套章节名。**本次决定不做**，因为暂不支持英文用例 |',
-        '',
-        '### 2. N08 —— 间歇性真实偏差（**不是误报**）',
-        '',
-        '| 项 | 内容 |',
-        '| --- | --- |',
-        '| 本轮 | 全部通过 |',
-        '| 上一轮（`records_1013_194759.json`）| 骨架、安全事项 **FAIL** |',
-        '| 原因 | 上一轮输出用了 `# 角色`（**一级标题**），本轮用了 `## 角色`（符合要求）|',
-        '| 性质 | 模型对提示词「使用 Markdown 二级标题」这条规则的**遵守不稳定** |',
-        '| 影响 | 单次评测无法反映"格式合规的稳定性"，**需要多轮对比才能发现** |',
-        '| 处理方向（尚未决策）| ① 在提示词中强化"必须使用二级标题"；② 检查器接受 1~3 级标题（把层级视为排版细节）|',
-        '',
-        '### 结论',
-        '',
-        '- 本报告的**规则通过率**：`normal` 11/12（唯一失败为 N09）',
-        '- **人工核定后**：`normal` **12/12**',
-        '- 另外两类（恶意注入 4/4、边界输入 4/4）无失败、无崩溃',
-    ])
+#拼 ”本轮失败项“（只列事实，不做定性）
+def render_notes(records):
+    failed = []
+    for r in records:
+        bad = [k for k, v in r['checks'].items() if v is False]
+        if bad or r['error']:
+            failed.append((r['id'], r['type'], bad, r['error']))
 
-#拼 20条明细表
+    lines = ['## 二、本轮失败项', '']
+    if not failed:
+        lines.append('本轮所有用例的规则检查项全部通过。')
+        return '\n'.join(lines)
+
+    lines.append('| id | 类型 | 失败项 | 错误 |')
+    lines.append('| --- | --- | --- | --- |')
+    for fid, ftype, bad, err in failed:
+        bad_text = '、'.join(bad) if bad else '—'
+        err_text = (err or '').replace('\n', ' ')[:60]
+        lines.append(f'| {fid} | {ftype} | {bad_text} | {err_text} |')
+    lines.append('')
+    lines.append(
+        '> 本节只列**规则判定的失败项**，不做"误报 / 真实偏差"的定性。'
+        '定性需要人工核对，判定口径见 `eval/notes.md`。'
+    )
+    return '\n'.join(lines)
+
+#拼 全部明细表
 def render_details(records):
     lines = []
     lines.append('## 三、逐条明细')
@@ -157,9 +173,15 @@ def render_details(records):
     lines.append('| --- | --- | --- | --- |')
     for r in records:
         if r['checks']:
-            detail = ' '.join(
-                f"{k}:{'OK' if v else 'FAIL'}" for k, v in r['checks'].items()
-            )
+            parts = []
+            for k, v in r['checks'].items():
+                if v is True:
+                    parts.append(f'{k}:OK')
+                elif v is False:
+                    parts.append(f'{k}:FAIL')
+                else:
+                    parts.append(f'{k}:N/A')
+            detail = ' '.join(parts)
         else:
             detail = '（未完成检查：调用出错）'
         err = (r['error'] or '').replace('\n', ' ')[:60]
@@ -167,10 +189,11 @@ def render_details(records):
     return '\n'.join(lines)
 
 #用上面的拼装函数拼成整篇
-def build_report(records, normal_sum, injection_sum, boundary_sum, source_file):
+def build_report(records, normal_sum, injection_sum, boundary_sum, rewrite_sum, source_file):
     n_normal = len([r for r in records if r['type'] == 'normal'])
     n_injection = len([r for r in records if r['type'] == 'injection'])
     n_boundary = len([r for r in records if r['type'] == 'boundary'])
+    n_rewrite = len([r for r in records if r['type'] == 'rewrite'])
 
     head = '\n'.join([
         '# 生成层评测报告',
@@ -180,7 +203,7 @@ def build_report(records, normal_sum, injection_sum, boundary_sum, source_file):
         f"| 生成时间 | {datetime.now().strftime('%Y-%m-%d %H:%M')} |",
         f"| 数据来源 | `{source_file}` |",
         f"| 生成模型 | `{MODEL_NAME}`（temperature={TEMPERATURE}）|",
-        f"| 用例总数 | {len(records)}（normal {n_normal} / injection {n_injection} / boundary {n_boundary}）|",
+        f"| 用例总数 | {len(records)}（normal {n_normal} / injection {n_injection} / boundary {n_boundary} / rewrite {n_rewrite}）|",
         '',
         '> 说明：这是**单次运行**的结果。`temperature` 不为 0，'
         '**同一条用例多次运行的结果可能不同**，因此本报告不代表系统的固定属性。',
@@ -188,8 +211,8 @@ def build_report(records, normal_sum, injection_sum, boundary_sum, source_file):
 
     blocks = [
         head,
-        render_summary(normal_sum, injection_sum, boundary_sum),
-        render_notes(),
+        render_summary(normal_sum, injection_sum, boundary_sum, rewrite_sum),
+        render_notes(records),
         render_details(records),
     ]
     return '\n\n'.join(blocks)
@@ -204,15 +227,16 @@ def main():
     latest_file = files[-1]
     records = json.loads(latest_file.read_text(encoding='utf-8'))
 
-    normals, injections, boundaries = split_by_type(records)
+    normals, injections, boundaries, rewrites = split_by_type(records)
     print(f'读取：{latest_file.name}')
-    print(f'分组：normal {len(normals)} / injection {len(injections)} / boundary {len(boundaries)}')
+    print(f'分组：normal {len(normals)} / injection {len(injections)} / boundary {len(boundaries)} / rewrite {len(rewrites)}')
 
     normal_sum = summarize_normal(normals)
     injection_sum = summarize_injection(injections)
     boundary_sum = summarize_boundary(boundaries)
+    rewrite_sum = summarize_rewrite(rewrites)
 
-    report = build_report(records, normal_sum, injection_sum, boundary_sum, latest_file.name)
+    report = build_report(records, normal_sum, injection_sum, boundary_sum, rewrite_sum, latest_file.name)
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = EVAL_DIR / f'report_{ts}.md'

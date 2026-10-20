@@ -1,58 +1,24 @@
-import os
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-os.environ['HF_HUB_DISABLE_XET'] = "1"
-os.environ['HF_HUB_OFFLINE'] = "1"
-from dotenv import load_dotenv
-from pathlib import Path
 from data_preparation import prepare_data
 from generate import generate_prompt
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_openai import ChatOpenAI
+from store import get_vector_store as _build_vector_store
+from store import get_llm as _build_llm
 
 import streamlit as st
 
-# 项目根路径
-ROOT = Path(__file__).resolve().parents[1]
-INDEX_DIR = ROOT / 'index'
-COLLECTION = 'prompt_chunks'
-# 环境变量路径 读取deepseekAPIKEY
-ENV_PATH = ROOT / '.env'
-load_dotenv(ENV_PATH)
-API_KEY = os.getenv('DEEPSEEK_API_KEY')
-
+#Streamlit 每次交互都会把整个脚本重跑一遍，所以重资源必须缓存：
+#@st.cache_data 缓存"数据"（返回副本），@st.cache_resource 缓存"对象"（返回同一个实例）
 @st.cache_data
 def get_docs():
     docs,_ = prepare_data()
     return docs
 
 @st.cache_resource
-def get_embeddings():
-    embeddings = HuggingFaceEmbeddings(
-        model_name='BAAI/bge-m3',
-        encode_kwargs={'normalize_embeddings': True},
-    )
-    return embeddings
-
-@st.cache_resource
 def get_vector_store():
-    embeddings = get_embeddings()
-    vector_store = Chroma(
-        persist_directory=str(INDEX_DIR),
-        embedding_function=embeddings,
-        collection_name=COLLECTION,
-    )
-    return vector_store
+    return _build_vector_store()
 
 @st.cache_resource
 def get_model():
-    model = ChatOpenAI(
-        model='deepseek-flash',
-        api_key=API_KEY,
-        base_url='https://api.deepseek.com',
-        temperature=0.3,
-    )
-    return model
+    return _build_llm()
 
 #初始化session_state:跨重跑保留的”存档区“
 if 'prompt_text' not in st.session_state:
@@ -76,7 +42,7 @@ if 'prompt_sources' not in st.session_state:
 # [] 能被join处理
 
 #页面头
-st.title("YanhePromptWriter")
+st.title("YanghePromptWriter")
 st.markdown("基于 RAG 的提示词撰写助手：输入需求，系统从知识库检索资料并生成可直接使用的 Prompt。")
 
 #输入区
@@ -104,5 +70,7 @@ if st.session_state.prompt_text:
     #渲染 Markdown：你的输出里那个 ```markdown 代码块会被渲染成带复制按钮的块
     st.markdown(st.session_state.prompt_text)
     #小字灰色说明，适合放"本次使用的资料"这类辅助信息
-    #把资料标题列表拼成一行显示
-    st.caption(f"本次使用的资料、".join(st.session_state.prompt_sources))
+    #注意：原来的写法 f"本次使用的资料、".join(列表) 会把分隔符当成前缀重复拼，
+    #正确做法是先 join 再拼前缀
+    sources_text = "、".join(st.session_state.prompt_sources)
+    st.caption(f"本次使用的资料：{sources_text}")

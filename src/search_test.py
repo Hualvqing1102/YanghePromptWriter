@@ -1,26 +1,9 @@
-import os
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-os.environ['HF_HUB_DISABLE_XET'] = "1"
-os.environ['HF_HUB_OFFLINE'] = "1"
-from pathlib import Path
 from data_preparation import prepare_data,get_parent_documents
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from store import get_vector_store,ROOT
 from datetime import datetime
 
-INDEX_DIR = Path(__file__).resolve().parents[1] / 'index'
 docs,all_chunks = prepare_data()
-
-embeddings = HuggingFaceEmbeddings(
-    model_name = 'BAAI/bge-m3',
-    encode_kwargs = {'normalize_embeddings':True},
-)
-
-vector_store = Chroma(
-    persist_directory = str(INDEX_DIR),
-    collection_name = 'prompt_chunks',
-    embedding_function = embeddings,
-)
+vector_store = get_vector_store()
 
 questions = [
     '怎么防止提示词注入攻击？',
@@ -48,6 +31,6 @@ for question in questions:
         save_to_eval.append(d.metadata['title'])
 
 ts = datetime.now().strftime('%m%d_%H%M')
-save_path = Path(__file__).resolve().parents[1]/'eval'/f"run_{ts}_chunks{len(all_chunks)}.md"
+save_path = ROOT/'eval'/f"run_{ts}_chunks{len(all_chunks)}.md"
 save_path.write_text('\n'.join(save_to_eval),encoding='utf-8')
 
