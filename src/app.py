@@ -156,6 +156,7 @@ if clicked_view:
         st.session_state.viewing_version = version_to_use
     else:
         st.session_state.viewing_version = None
+
 if st.session_state.prompt_text:
     st.divider()    #一条水平分割线，隔开输入区和结果区
     viewing = st.session_state.viewing_version
@@ -181,3 +182,11 @@ if st.session_state.prompt_text:
             req_summary = item['requirement'][:30] or '无新要求'
             st.caption(f"正在查看 v{viewing} · {req_summary}")
             st.code(item['prompt'], language='markdown')
+
+st.divider()
+if st.button('清空历史',disabled=not st.session_state.history):
+    st.session_state.history = []
+    st.session_state.viewing_version = None
+    st.session_state.version = None
+    st.session_state.prompt_text = ''
+    st.session_state.prompt_sources = []
