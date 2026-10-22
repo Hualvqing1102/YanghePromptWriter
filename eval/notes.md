@@ -821,6 +821,115 @@ v4 那轮把输入框清空后点了生成（`requirement: ""`），`effective` 
 3. **"覆盖渲染"用互斥分支实现最干净**
    不新增容器、不隐藏元素，让 `viewing_version` 决定走哪条分支——天然只有一份内容出现在页面上。
 
+---
+
+## 十九、检索层实验五：rerank 重排序（2026-10-20 深夜）——✅ **采用**
+
+### 动机
+
+`notes.md` 第三节列出的"正确解法"里，唯一还没兑现的就是 **rerank**：
+
+> 跨语言排序不理想 | Q1/Q4 最该命中的项排不上去 | 加 rerank 重排序
+
+前四次实验（H4 细分、k=8、兜底切分、噪声过滤）证明**调分块参数无效、处理数据质量有效**。rerank 属于第三类：**换排序模型**。
+
+### 做法：两步检索
+
+```
+query → 向量库宽召回 RECALL_K=20 → reranker 逐个打分 → 取前 TOP_K=5 → 回溯父文档 → 喂给 LLM
+```
+
+| 文件 | 改动 |
+|---|---|
+| `src/store.py` | 新增 `RERANK_MODEL` 常量 + `get_reranker()`（`@lru_cache` 单例，避免每轮重载 1.1 GB 模型）|
+| `src/generate.py` | 新增 `RECALL_K=20` / `USE_RERANK=True`；`rerank_chunks()`；`retrieve_parents()` 分两分支；`generate_prompt()` 加 `retrieval_query` 参数 |
+| `src/app.py` | 调用时传 `retrieval_query=requirement`（检索用原文，不用拼接版）|
+
+**`USE_RERANK` 是退路**：改 `False` 立刻回到原流程（k=5 纯向量检索），不需要删代码或回滚 git。
+
+### 三个关键设计决定
+
+**① 只排序，绝不用分数阈值过滤**
+
+第一次实测（`_rerank_test.py`，已删）三组打分：
+
+| 文档 | 分数 | 说明 |
+|---|---|---|
+| 英文注入防御（**真相关**，中文提问） | **0.239697** | 正例 |
+| 中文少样本提示（不相关） | 0.000147 | |
+| 纯链接列表（噪声） | 0.000018 | 负例 |
+
+排序完全正确，但**跨语言正例的绝对分数只有 0.24**（sigmoid 后 ≈ 24% 把握）。由此定下纪律：
+
+> 任何"分数 < 0.3 就当没检索到"的阈值都会误杀跨语言正确结果。**rerank 只负责排序，不负责判断"有没有"**。
+
+**② 打分前截前 500 字**
+
+`bge-reranker-v2-m3` 默认 `max_length=512` token，**超出会被静默截断**（不报错、不提示）。本项目 chunk 平均 941 字符、最长上万字符——不主动截断，模型看到的和"你以为它在看的"不是一回事，而且长文本推理更慢。
+
+截前 500 字（约 250 汉字）的假设：按标题切分的块，**关键信息在开头**（标题 + 首段）。这是近似，已在代码注释中标明。
+
+**③ 检索用"干净的问题"，生成用"完整的需求"**
+
+新增 `retrieval_query` 参数，`query_for_search = retrieval_query or requirement`：
+
+| 用途 | 用什么 | 为什么 |
+|---|---|---|
+| 检索 + 重排 | `retrieval_query`（用户原文） | 上一版 Prompt 有几千字，会稀释向量检索、占满 rerank 的 512 token 窗口 |
+| 拼给模型的消息 | `requirement`（拼接版） | 模型必须看到上一版才能改 |
+| 判形态 `detect_requirement_type` | `requirement`（拼接版） | 上一版的标题会带来更多 `#` 行 → 判 `rewrite`，正合意 |
+
+### 实验：3 条需求的 A/B 对比
+
+同一份代码，只切 `USE_RERANK`：
+
+| 需求 | rerank **开** | rerank **关** | 判断 |
+|---|---|---|---|
+| 1. 代码审查 | gh_ai-safety / **`code_review_generic_instructions`** | gh_ai-safety / **`langgpt_prompt_templates`** | ✅ **改善** |
+| 2. 改写数据抽取 | arize-optimization / safety_review | arize-optimization / tldr_prompt | 中性偏改善 |
+| 3. 注入 | context_engineering / exclude-prompt-data | context_engineering / datawhale_pe_intro | 中性 |
+
+**需求 1 是关键证据**：关掉 rerank，`langgpt_prompt_templates` 又回来了——正是第十三节记录过的老问题：
+
+> `langgpt_prompt_templates` 其实是项目 README，一半章节是元信息……**这类内容宽泛到能匹配任何"写 Prompt"的提问，会霸榜**
+
+当时的对策是**人工裁剪文档**（439 → 228 行）。现在 rerank 自动把它压下去、把专讲代码审查的 `code_review_generic_instructions` 顶上来——**同一个病根，换了一种修法**。
+
+### 决定：保留，但**不做** 5 问题完整对比
+
+讨论后的判断：
+
+| 理由 | 说明 |
+|---|---|
+| 3 条已给出方向 | 1 改善、0 变差，且改善命中已知病根 |
+| 完整评测测不到它 | 30 条评测的检查项全是形式合规；第十二节已明确"评测对检索质量看不见" |
+| 样本都太小 | 3 条说明不了统计意义，5 条也一样 |
+| 真正的判据是使用体验 | 接下来几天实际使用，看检索到的资料对不对口——比任何小样本对比都准 |
+
+### 代价
+
+| 项 | 值 |
+|---|---|
+| 延迟 | 每次查询 +0.3~0.8 秒（20 个候选过一次交叉编码器，CPU）|
+| 内存 | 与嵌入模型同时驻留，约 +1 GB |
+| 首次加载 | 3~8 秒（之后走 HF 缓存，离线可用——模型在 `C:\Users\31326\.cache\huggingface`）|
+| 下载 | 1.1 GB，经 `hf-mirror.com`；首次可能遇 HTTP 429，`huggingface_hub` 会自动重试（最多 5 次，等待递增）|
+
+### 踩过的四个坑
+
+| 现象 | 原因 | 教训 |
+|---|---|---|
+| 报错指到 `@lru_cache` 行：`expected ')'` | 上一函数 `return (ChatOpenAI(` 多了一个左括号，一直没闭合 | **括号不配对时，报错位置永远在"后面"**——往上找开括号多于闭括号的地方 |
+| PyCharm 自动导入 `from chromadb.utils import lru_cache` | IDE 候选按名字模糊匹配，选错了模块 | `lru_cache` 的标准库来源是 `functools`；遇到不认识的内置工具先想"它属于哪个标准库模块" |
+| `filter={'is_noise','no'}` | 少了冒号 → Python 当成**集合**而不是字典 | 集合型 filter 会让 chroma 报错或过滤静默失效 |
+| `query_for_search` 算了但没接上 | `retrieve_parents(requirement, ...)` 还在用旧变量 | 新增中间变量后，必须确认它**真的被用到了** |
+
+### 三条认知
+
+1. **"宽召回 + 精排"是标准的两段式检索**，比调分块参数有效得多——四次分块实验全废，换排序模型立刻见效。
+2. **分数的绝对值和排序能力是两件事**。跨语言正例只有 0.24，但排序正确；把绝对值当阈值用会误杀。
+3. **同一个病可以有不同的解法**。`langgpt` 霸榜这个问题，第十三节的解法是"人工裁剪文档"，这次的解法是"上 rerank 自动压制"。**能用机制解决的，不要长期依赖人工维护**。
+
 
 
 

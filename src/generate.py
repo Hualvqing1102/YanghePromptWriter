@@ -1,7 +1,9 @@
 from data_preparation import prepare_data,get_parent_documents
-from store import get_vector_store,get_llm,ROOT
+from store import get_vector_store,get_llm,ROOT,get_reranker
 
 TOP_K = 5
+RECALL_K = 20
+USE_RERANK = True
 MAX_PARENTS = 2
 MAX_CHARS = 12000
 PROMPT_PATH = ROOT / 'prompts' / 'system_prompt.md'
@@ -26,10 +28,35 @@ def build_context(parent_docs):
         blocks.append(head+'\n'+body)
     return '\n\n'.join(blocks)
 
+def rerank_chunks(query,chunks,top_n=TOP_K,max_chars=500):
+    if not chunks:
+        return []
+    reranker = get_reranker()
+    #只截前 max_chars 个字 : reranker 默认只吃 512 token ，长块会被静默截断
+    pairs = [(query,c.page_content.strip()[:max_chars]) for c in chunks]
+    scores = reranker.predict(pairs)
+    #用 key 只比较分数：直接 sorted(zip()) 在分数相同时会去比较 Document 对象而报错
+    ranked = sorted(zip(scores,chunks),key=lambda item:item[0],reverse=True)
+    return [chunk for _,chunk in ranked[:top_n]]
+
 #追溯父列表
 def retrieve_parents(query,vector_store,docs):
-    results = vector_store.similarity_search_with_score(query,filter={'is_noise':'no'},k=TOP_K)
-    chunk_list = [chunk for chunk,_ in results]
+    if USE_RERANK:
+        #宽召回 : 先捞 RECALL_K 个候选，交给reranker重排，再取前 TOP_K
+        results = vector_store.similarity_search(
+            query,
+            k = RECALL_K,
+            filter = {'is_noise':'no'}
+        )
+        chunk_list = rerank_chunks(query,results,TOP_K)
+    else:
+        # 原流程：直接取 TOP_K 个（带分数是为了兼容旧代码，这里只用 chunk）
+        results = vector_store.similarity_search_with_score(
+            query,
+            k=TOP_K,
+            filter={'is_noise': 'no'},
+        )
+        chunk_list = [chunk for chunk, _ in results]
     return get_parent_documents(chunk_list,docs)
 
 #输入：拼好的资料、用户需求 输出：一个字符串
@@ -44,9 +71,10 @@ def build_user_message(context,requirement,req_type):
     )
 
 #控制‘model’
-def generate_prompt(requirement,vector_store,docs,model):
+def generate_prompt(requirement,vector_store,docs,model,retrieval_query=None):
     req_type = detect_requirement_type(requirement)
-    parent_docs = retrieve_parents(requirement,vector_store,docs)
+    query_for_search = retrieval_query or requirement
+    parent_docs = retrieve_parents(query_for_search,vector_store,docs)
     used_docs = parent_docs[:MAX_PARENTS]
     context = build_context(used_docs)
     user_message = build_user_message(context,requirement,req_type)
