@@ -1,0 +1,26 @@
+# YanghePrompt 直接依赖（精简版）
+#
+# 用法：pip install -r requirements-min.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 与 requirements.txt 的区别：
+#   requirements.txt      = 当前开发环境的完整 freeze（140+ 包，完全可复现，但装得慢）
+#   requirements-min.txt  = 只列本项目直接 import 的包（装得快，torch / transformers 等由依赖链自动带出）
+#
+# 版本号取自 requirements.txt，保证与开发环境一致。
+# 维护方法：grep "^from \|^import " src/*.py → 剔掉标准库 → 剩下的就是这里的清单。
+
+# --- 文档加载与切分（src/data_preparation.py）---
+langchain==1.4.4
+langchain-community==0.4.2
+langchain-text-splitters==1.1.3
+
+# --- 嵌入 / 向量库 / LLM（src/store.py）---
+langchain-huggingface==1.2.3
+langchain-chroma==1.1.0
+langchain-openai==1.7.1
+chromadb==1.5.9
+sentence-transformers==6.1.0
+
+# --- 界面与配置（src/app.py、src/store.py）---
+streamlit==1.65.0
+python-dotenv==1.2.4

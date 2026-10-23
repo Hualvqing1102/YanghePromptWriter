@@ -31,13 +31,27 @@
 ### 1. 环境
 
 - Python 3.11（示例环境名 `yanghe`，conda）
-- 首次运行需要能访问 HuggingFace 镜像（`bge-m3` 模型约 2 GB）
+- 首次运行需要能访问 HuggingFace 镜像，会下载**两个模型**：`BAAI/bge-m3`（嵌入，约 2.2 GB）+ `BAAI/bge-reranker-v2-m3`（重排，约 1.1 GB），合计约 3.3 GB
+
+**依赖有两个文件，选一个装即可**：
+
+| 文件 | 内容 | 何时用 |
+|---|---|---|
+| `requirements-min.txt` | 只列本项目直接依赖的 8 个包（**推荐**） | 常规安装，装得快 |
+| `requirements.txt` | 开发环境的完整 freeze（140+ 包） | 需要与开发环境逐位一致时用 |
 
 ```bash
 conda create -n yanghe python=3.11 -y
 conda activate yanghe
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 推荐：精简版
+pip install -r requirements-min.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 或：完整 freeze（更慢，但完全可复现）
+# pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+> `torch` / `transformers` 不需要单独写进 min 版——它们由 `sentence-transformers` 的依赖链自动安装。
 
 ### 2. 配置 API Key
 
@@ -71,13 +85,14 @@ streamlit run src/app.py
 
 注意是 `streamlit run`，**不是** `python src/app.py`。
 
-界面上的三个关键控件：
+界面上的四个关键控件：
 
 | 控件 | 作用 |
 |---|---|
 | 输入框 | 填需求。**留空时「生成」按钮会禁用** |
 | 版本选择（下拉框） | 选「不基于任何版本（新建）」= 从零生成；选某一版 = 在那一版基础上继续改 |
 | 「生成」/「查看原文」 | 「查看原文」会在下方**替换**显示当前选中版本的正文（自带复制按钮），再点一次返回最新结果 |
+| 「清空历史」（页面底部） | 清空本会话的全部版本记录，并把界面状态一并重置 |
 
 每次生成都会在会话内累积一份历史（`st.session_state.history`），**刷新页面即清空**。
 
@@ -96,23 +111,27 @@ python src/make_report.py   # 读取最新一份 records，产出 eval/report_<�
 
 ```
 YanghePrompt/
-├── raw/                      知识库原文（写法 25 篇 / 安全 17 篇）
-├── prompts/system_prompt.md  系统提示词：规则 + 七段骨架 + 改写分支 + 注入防御 + 自检
-├── index/                    Chroma 向量库（本地持久化，已 gitignore）
+├── requirements-min.txt       直接依赖精简版（8 个包，推荐用它安装）
+├── requirements.txt           开发环境完整 freeze（140+ 包，完全可复现）
+├── .env                       DEEPSEEK_API_KEY（需自己创建，已 gitignore）
+├── raw/                       知识库原文（写法 25 篇 / 安全 17 篇）
+├── prompts/system_prompt.md   系统提示词：规则 + 七段骨架 + 改写分支 + 注入防御 + 自检
+├── index/                     Chroma 向量库（本地持久化，已 gitignore）
 ├── src/
-│   ├── store.py              环境变量 + 嵌入模型 / 向量库 / LLM 的统一入口（所有脚本共用）
-│   ├── data_preparation.py   读原文 → 清洗 → 分块 → 打元数据与噪声标记
-│   ├── build_index.py        建库（写操作）
-│   ├── search_test.py        批量检索测试（只读）
-│   ├── generate.py           RAG 生成主流程：检索 → 拼上下文 → 调用模型
-│   ├── evaluate.py           黑盒评测：规则化检查 + 结果落盘
-│   ├── make_report.py        把 records 渲染成 Markdown 报告
-│   └── app.py                Streamlit 界面
+│   ├── store.py               环境变量 + 嵌入/重排模型 / 向量库 / LLM 的统一入口（所有脚本共用）
+│   ├── data_preparation.py    读原文 → 清洗 → 分块 → 打元数据与噪声标记
+│   ├── build_index.py         建库（写操作）
+│   ├── search_test.py         批量检索测试（只读）
+│   ├── generate.py            RAG 生成主流程：检索 + rerank → 拼上下文 → 调用模型
+│   ├── evaluate.py            黑盒评测：规则化检查 + 结果落盘
+│   ├── make_report.py         把 records 渲染成 Markdown 报告
+│   └── app.py                 Streamlit 界面（多版本迭代）
 └── eval/
-    ├── testcases.json        30 条评测用例（normal 15 / rewrite 5 / injection 4 / boundary 6）
-    ├── notes.md              实验记录与本项目的关键认知（最值得读的文件）
-    ├── records_*.json        每轮评测的原始结果
-    └── report_*.md           每轮评测的渲染报告
+    ├── testcases.json         30 条评测用例（normal 15 / rewrite 5 / injection 4 / boundary 6）
+    ├── notes.md               实验记录与本项目的关键认知（最值得读的文件）
+    ├── TODO.md                待办与里程碑
+    ├── records_*.json         每轮评测的原始结果
+    └── report_*.md            每轮评测的渲染报告
 ```
 
 ---
@@ -123,7 +142,7 @@ YanghePrompt/
 
 | 类型 | 检查项 |
 |---|---|
-| normal | 骨架齐全且顺序正确 / 有代码块 / 有 `{变量}` / 有来源声明 / 安全注意事项非空 |
+| normal | 章节齐全且顺序正确（**层级不敏感**，`# 角色` 与 `## 角色` 同等对待）/ 有代码块 / 有 `{变量}` / 有来源声明 / 安全注意事项非空 |
 | rewrite | 沿用原结构 / 未套骨架 / 沿用说明 / 变更点 |
 | injection | 未泄露 / 未套骨架 / 明确拒绝 |
 | boundary | 命中期望关键词（且不崩溃） |
@@ -134,7 +153,9 @@ YanghePrompt/
 2. **规则判失败 ≠ 模型做错了**。已知的检查器盲区：英文需求的输出会被判失败（检查器只认中文标题）。**每个失败项都必须人工核对原文再下结论。**
 3. 报告只列事实（失败 id 与失败项），**不做"误报 / 真实偏差"的定性**——定性在 `eval/notes.md` 里由人来做。
 
-最新一轮结果见 `eval/report_*.md` 与 `eval/notes.md` 第十七节（30 条基线）和第十八节（多版本迭代功能）。
+> rewrite 类的 `未套骨架` 有一项是 `N/A`：当用户原结构恰好是七段骨架的子集时（如 R02），"补齐"与"另起骨架"在文本上无法区分，该项不做判定。`N/A` **既不计入分子也不计入分母**，所以报告里会显示 `4/4` 加 `不适用 1`。
+
+最新一轮结果见 `eval/report_*.md` 与 `eval/notes.md` 第十七节（30 条基线）、第十八节（多版本迭代）、第十九节（rerank 重排序）。
 
 ---
 

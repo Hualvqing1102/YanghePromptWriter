@@ -930,6 +930,94 @@ query → 向量库宽召回 RECALL_K=20 → reranker 逐个打分 → 取前 TO
 2. **分数的绝对值和排序能力是两件事**。跨语言正例只有 0.24，但排序正确；把绝对值当阈值用会误杀。
 3. **同一个病可以有不同的解法**。`langgpt` 霸榜这个问题，第十三节的解法是"人工裁剪文档"，这次的解法是"上 rerank 自动压制"。**能用机制解决的，不要长期依赖人工维护**。
 
+---
+
+## 二十、迁移测试：把项目当成"别人刚拿到"（2026-10-21）
+
+### 为什么做
+
+功能和文档都齐了，但**"我这儿能跑"不等于"别人那儿能跑"**。这一轮的目的是假装自己什么都不知道，只照 `README.md` 从头走一遍，看会不会卡住。
+
+### 怎么做（两个独立测试）
+
+| 测试 | 做法 | 验证什么 |
+|---|---|---|
+| **A 冷启动** | robocopy 把项目复制到 `_migrate_test`，**排除** `.git` / `.idea` / `index` / `__pycache__`；保留 `.env` | 文档步骤是否准确、路径是否对、重建库是否成功 |
+| **B 依赖迁移** | 新建干净 conda 环境 `yanghe_prompt_test`，只用 `requirements-min.txt` 装依赖 | 精简依赖清单是否**真的完整** |
+
+### 结果
+
+| 项 | 结果 |
+|---|---|
+| README 步骤 A | ✅ 全部走通：`build_index.py` 输出 **487**、`generate.py` 三条需求正常、两个模型都从共享缓存加载（不重下 3.3 GB）|
+| 依赖清单 B | ❌ **不完整**，见下 |
+| 路径独立性 | ✅ 副本的 `index/` 建在 `_migrate_test` 内，原项目 `index/` 未被触碰 |
+
+### 抓到的真问题：`requirements-min.txt` 漏了两个包
+
+在干净环境跑 `generate.py` 直接崩：
+
+```
+ModuleNotFoundError: No module named 'langchain_community'
+  File "src/data_preparation.py", line 1
+    from langchain_community.document_loaders import DirectoryLoader, TextLoader
+```
+
+补了一轮后还有 `langchain_text_splitters`（`data_preparation.py` 第 3 行，`MarkdownHeaderTextSplitter`）。
+
+**根因**：写精简清单时是**凭记忆**列的（"我记得项目用了 langchain-chroma / huggingface / openai"），而 `data_preparation.py` 是检索链路入口，它那两个包不在记忆里，漏了也不会有任何提示——直到换环境才暴露。
+
+**修法与可复用的方法**：
+
+```bash
+grep "^from \|^import " src/*.py     # 1. 列出所有 import
+```
+
+2. 剔掉标准库（`json` / `os` / `re` / `pathlib` / `datetime` / `functools` / `collections`）
+3. 剩下的第三方包就是直接依赖清单
+
+已按这个方法重写 `requirements-min.txt`，并按"谁在用"分组。**现在共 10 个包**：
+
+| 组 | 包 |
+|---|---|
+| 文档加载与切分 | `langchain`、`langchain-community`、`langchain-text-splitters` |
+| 嵌入 / 向量库 / LLM | `langchain-huggingface`、`langchain-chroma`、`langchain-openai`、`chromadb`、`sentence-transformers` |
+| 界面与配置 | `streamlit`、`python-dotenv` |
+
+### 顺带发现的两个隐患（未修，仅记录）
+
+**① `index/` 会随着重建累积**
+
+| 目录 | `chroma.sqlite3` | 向量段目录 |
+|---|---|---|
+| 原项目 `index/` | 8.4 MB | **3 个** |
+| 迁移副本（刚重建） | 7.4 MB | 1 个 |
+
+`reset_collection()` 只清数据行，**旧段的物理文件不删**。不影响检索正确性（只有当前 collection 的段参与查询），但体积会一直长。彻底清理的办法：**删掉整个 `index/` 目录再跑 `build_index.py`**。
+
+**② 两个模型同时驻留约 4.5~5 GB**
+
+`bge-m3`（2.2 GB）+ `bge-reranker-v2-m3`（1.1 GB）+ Python/torch 运行时（约 1 GB）。测试中遇到过：
+
+```
+OSError: 页面文件太小，无法完成操作。(os error 1455)
+```
+
+含义是**系统提交内存不足**（物理内存 + 页面文件）。处理顺序：
+
+1. 关掉残留的 python/streamlit 进程（最常见的元凶，一个 Streamlit 会话就占 3~4 GB）
+2. 关掉多余的 PyCharm 项目窗口（每个占几百 MB 到 2 GB）
+3. 加大 Windows 页面文件（自定义 8~16 GB，需重启）
+4. 应急：`USE_RERANK = False`（回到纯向量检索）或换 `bge-reranker-base`（560 MB）
+
+**这也是 rerank 的真实代价之一**，第十九节记的"+1 GB 内存"是保守估计，实际峰值要看进程里还有什么。
+
+### 三条认知
+
+1. **"能跑"和"能给别人跑"是两件事**。所有代码在本机一直没动，只是换个目录、换个环境，就立刻暴露出两个缺失依赖。
+2. **凭记忆维护依赖清单不可靠，grep 才可靠**。清单应该从代码里生成，而不是从脑子里回忆。
+3. **干净环境测试是唯一能验证依赖完整性的手段**。本机装有 140+ 个包，任何缺失都会被"碰巧装着"掩盖——**这也是为什么开发环境越臃肿，越需要做这一步**。
+
 
 
 
