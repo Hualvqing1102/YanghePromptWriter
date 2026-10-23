@@ -139,7 +139,7 @@ if clicked_generate:
                 get_vector_store(),
                 get_docs(),
                 get_model(),
-                retrieval_qurery=requirement,
+                retrieval_query=requirement,
             )
             version = append_history(
                 requirement,
